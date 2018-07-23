@@ -9,6 +9,10 @@ Benjamin Recht
 import numpy as np
 from filter import get_filter
 
+# @avemula
+import autograd.numpy as anp
+from autograd import grad
+
 class Policy(object):
 
     def __init__(self, policy_params):
@@ -56,3 +60,24 @@ class LinearPolicy(Policy):
         aux = np.asarray([self.weights, mu, std])
         return aux
         
+
+class NNPolicy(Policy):
+
+    def __init__(self, policy_params):
+        Policy.__init__(self, policy_params)
+        self.hidden_dim = 10
+        self.scale = 0.01
+        self.weights = [(self.scale * anp.random.randn(self.ob_dim, self.hidden_dim), self.scale * anp.random.randn(self.hidden_dim)), (self.scale * anp.random.randn(self.hidden_dim, self.ac_dim), self.scale * anp.random.randn(self.ac_dim))]
+
+
+    def act(self, ob):
+        ob = self.observation_filter(ob, update=self.update_filter)
+        inputs = ob.copy()
+        for W, b in self.weights:
+            outputs = anp.dot(ob, W) + b
+            inputs = anp.tanh(outputs)
+
+        return outputs
+
+    def update_weights(self, new_weights):
+        self.weights = new_weights

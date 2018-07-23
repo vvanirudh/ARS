@@ -78,6 +78,10 @@ class Worker(object):
         actions = []
 
         ob = self.env.reset()
+        # @avemula
+        # If goal already achieved at the start
+        #while np.linalg.norm(ob['desired_goal'] - ob['achieved_goal'], axis=-1) < 0.05:
+        #    ob = self.env.reset()
         for i in range(rollout_length):
             # @avemula
             obs = ob['observation']
@@ -242,11 +246,16 @@ class ARSLearner(object):
         if policy_params['type'] == 'linear':
             self.policy = LinearPolicy(policy_params)
             self.w_policy = self.policy.get_weights()
+        elif policy_params['type'] == 'nn':
+            self.policy = NNPolicy(policy_params)
+            self.w_policy = self.policy.get_weights()
         else:
             raise NotImplementedError
             
         # initialize optimization algorithm
-        self.optimizer = optimizers.SGD(self.w_policy, self.step_size)        
+        # self.optimizer = optimizers.SGD(self.w_policy, self.step_size)
+        # @avemula
+        self.optimizer = optimizers.Adam(self.w_policy, self.step_size)
         print("Initialization of ARS complete.")
 
     def aggregate_rollouts(self, num_rollouts = None, evaluate = False):
@@ -364,10 +373,10 @@ class ARSLearner(object):
         # @avemula
         print("Euclidean norm of bc update step:", np.linalg.norm(bc_grad))
         # TODO: Taking the mean for now. Need to make it more rigid
-        #grad = (g_hat.reshape(self.w_policy.shape) + bc_grad) / 2
+        grad = (g_hat + bc_grad.flatten()) / 2
         # @avemula
-        #self.w_policy -= self.optimizer._compute_step(grad)
-        self.w_policy -= self.optimizer._compute_step(g_hat).reshape(self.w_policy.shape)
+        self.w_policy -= self.optimizer._compute_step(grad).reshape(self.w_policy.shape)
+        # self.w_policy -= self.optimizer._compute_step(g_hat).reshape(self.w_policy.shape)
         # @avemula
         self.policy.update_weights(self.w_policy)
         return
@@ -489,7 +498,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     # parser.add_argument('--env_name', type=str, default='HalfCheetah-v2')
-    parser.add_argument('--env_name', type=str, default='FetchSlide-v1')
+    parser.add_argument('--env_name', type=str, default='FetchPush-v1')
     parser.add_argument('--n_iter', '-n', type=int, default=1000)
     parser.add_argument('--n_directions', '-nd', type=int, default=8)
     parser.add_argument('--deltas_used', '-du', type=int, default=8)
