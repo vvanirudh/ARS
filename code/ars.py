@@ -17,6 +17,7 @@ import optimizers
 from policies import *
 import socket
 from shared_noise import *
+import ipdb
 
 @ray.remote
 class Worker(object):
@@ -33,6 +34,7 @@ class Worker(object):
 
         # initialize OpenAI environment for each worker
         self.env = gym.make(env_name)
+        # self.env.reward_type='dense'
         self.env.seed(env_seed)
 
         # each worker gets access to the shared noise table
@@ -69,16 +71,40 @@ class Worker(object):
         total_reward = 0.
         steps = 0
 
+        # @avemula
+        observations = []
+        achieved_goals = []
+        true_goals = []
+        actions = []
+
         ob = self.env.reset()
         for i in range(rollout_length):
-            action = self.policy.act(ob)
+            # @avemula
+            obs = ob['observation']
+            ag = ob['achieved_goal']
+            g = ob['desired_goal']
+            observations.append(obs)
+            achieved_goals.append(ag)
+            true_goals.append(g)
+            input_obs = np.concatenate([obs, g])
+            action = self.policy.act(input_obs)
+            actions.append(action)
             ob, reward, done, _ = self.env.step(action)
             steps += 1
             total_reward += (reward - shift)
             if done:
                 break
-            
-        return total_reward, steps
+        obs = ob['observation']
+        ag = ob['achieved_goal']
+        observations.append(obs)
+        achieved_goals.append(ag)
+        # @avemula
+        info = {'observations': np.array(observations),
+                'achieved_goals': np.array(achieved_goals),
+                'true_goals': np.array(true_goals),
+                'actions': np.array(actions)}
+
+        return total_reward, steps, info 
 
     def do_rollouts(self, w_policy, num_rollouts = 1, shift = 1, evaluate = False):
         """ 
@@ -86,6 +112,9 @@ class Worker(object):
         """
 
         rollout_rewards, deltas_idx = [], []
+        # @avemula
+        # observations, achieved_goals, true_goals, actions = [], [], [], []
+        episodes = []
         steps = 0
 
         for i in range(num_rollouts):
@@ -99,7 +128,7 @@ class Worker(object):
 
                 # for evaluation we do not shift the rewards (shift = 0) and we use the
                 # default rollout length (1000 for the MuJoCo locomotion tasks)
-                reward, r_steps = self.rollout(shift = 0., rollout_length = self.env.spec.timestep_limit)
+                reward, r_steps, _ = self.rollout(shift = 0., rollout_length = self.env.spec.timestep_limit)
                 rollout_rewards.append(reward)
                 
             else:
@@ -113,16 +142,31 @@ class Worker(object):
 
                 # compute reward and number of timesteps used for positive perturbation rollout
                 self.policy.update_weights(w_policy + delta)
-                pos_reward, pos_steps  = self.rollout(shift = shift)
+                pos_reward, pos_steps, pos_info = self.rollout(shift = shift)
 
                 # compute reward and number of timesteps used for negative pertubation rollout
                 self.policy.update_weights(w_policy - delta)
-                neg_reward, neg_steps = self.rollout(shift = shift) 
+                neg_reward, neg_steps, neg_info = self.rollout(shift = shift) 
                 steps += pos_steps + neg_steps
 
                 rollout_rewards.append([pos_reward, neg_reward])
+                # @avemula
+                # observations += pos_info['observations'] + neg_info['observations']
+                #achieved_goals += pos_info['achieved_goals'] + neg_info['achieved_goals']
+                #true_goals += pos_info['true_goals'] + neg_info['true_goals']
+                #actions += pos_info['actions'] + neg_info['actions']
+                episodes.append(pos_info)
+                episodes.append(neg_info)
                             
-        return {'deltas_idx': deltas_idx, 'rollout_rewards': rollout_rewards, "steps" : steps}
+        # @avemula
+        return {'deltas_idx': deltas_idx,
+                'rollout_rewards': rollout_rewards,
+                "steps" : steps,
+                # 'observations': observations,
+                # 'achieved_goals': achieved_goals,
+                # 'true_goals': true_goals,
+                # 'actions': actions}
+                'episodes': episodes}
     
     def stats_increment(self):
         self.policy.observation_filter.stats_increment()
@@ -164,7 +208,7 @@ class ARSLearner(object):
         
         self.timesteps = 0
         self.action_size = env.action_space.shape[0]
-        self.ob_size = env.observation_space.shape[0]
+        self.ob_size = env.observation_space.spaces['observation'].shape[0] + env.observation_space.spaces['desired_goal'].shape[0]
         self.num_deltas = num_deltas
         self.deltas_used = deltas_used
         self.rollout_length = rollout_length
@@ -236,22 +280,40 @@ class ARSLearner(object):
         results_one = ray.get(rollout_ids_one)
         results_two = ray.get(rollout_ids_two)
 
-        rollout_rewards, deltas_idx = [], [] 
+        rollout_rewards, deltas_idx = [], []
+        # @avemula
+        # observations, achieved_goals, true_goals, actions = [], [], [], []
+        episodes = []
 
         for result in results_one:
             if not evaluate:
                 self.timesteps += result["steps"]
             deltas_idx += result['deltas_idx']
             rollout_rewards += result['rollout_rewards']
+            # @avemula
+            # observations += result['observations']
+            # achieved_goals += result['achieved_goals']
+            # true_goals += result['achieved_goals']
+            # actions += result['actions']
+            episodes += result['episodes']
 
         for result in results_two:
             if not evaluate:
                 self.timesteps += result["steps"]
             deltas_idx += result['deltas_idx']
             rollout_rewards += result['rollout_rewards']
+            # @avemula
+            # observations += result['observations']
+            # achieved_goals += result['achieved_goals']
+            # true_goals += result['achieved_goals']
+            # actions += result['actions']
+            episodes += result['episodes']
 
         deltas_idx = np.array(deltas_idx)
         rollout_rewards = np.array(rollout_rewards, dtype = np.float64)
+        # @avemula
+        if not evaluate:            
+            episodes = utils.restructure_episodes(episodes)
         
         print('Maximum reward of collected rollouts:', rollout_rewards.max())
         t2 = time.time()
@@ -260,6 +322,10 @@ class ARSLearner(object):
 
         if evaluate:
             return rollout_rewards
+
+        # @avemula
+        supervised_loss, supervised_gradient = self.compute_supervised_gradient(episodes, batch_size=100)
+        print('Behavior Cloning loss: ', supervised_loss)
 
         # select top performing directions if deltas_used < num_deltas
         max_rewards = np.max(rollout_rewards, axis = 1)
@@ -271,7 +337,9 @@ class ARSLearner(object):
         rollout_rewards = rollout_rewards[idx,:]
         
         # normalize rewards by their standard deviation
-        rollout_rewards /= np.std(rollout_rewards)
+        # @avemula : Rewards are all zero then avoid divide by zero
+        if np.std(rollout_rewards) > 1e-4:
+            rollout_rewards /= np.std(rollout_rewards)
 
         t1 = time.time()
         # aggregate rollouts to form g_hat, the gradient used to compute SGD step
@@ -282,17 +350,26 @@ class ARSLearner(object):
         g_hat /= deltas_idx.size
         t2 = time.time()
         print('time to aggregate rollouts', t2 - t1)
-        return g_hat
+        # @avemula
+        return g_hat, supervised_gradient
         
 
     def train_step(self):
         """ 
         Perform one update step of the policy weights.
         """
-        
-        g_hat = self.aggregate_rollouts()                    
+        # @avemula
+        g_hat, bc_grad = self.aggregate_rollouts()                    
         print("Euclidean norm of update step:", np.linalg.norm(g_hat))
+        # @avemula
+        print("Euclidean norm of bc update step:", np.linalg.norm(bc_grad))
+        # TODO: Taking the mean for now. Need to make it more rigid
+        #grad = (g_hat.reshape(self.w_policy.shape) + bc_grad) / 2
+        # @avemula
+        #self.w_policy -= self.optimizer._compute_step(grad)
         self.w_policy -= self.optimizer._compute_step(g_hat).reshape(self.w_policy.shape)
+        # @avemula
+        self.policy.update_weights(self.w_policy)
         return
 
     def train(self, num_iter):
@@ -343,7 +420,32 @@ class ARSLearner(object):
             t2 = time.time()
             print('Time to sync statistics:', t2 - t1)
                         
-        return 
+        return
+
+    # @avemula
+    def compute_supervised_gradient(self, episodes, batch_size=500):
+        '''
+        Compute the behavior cloning loss
+        '''
+        num_episodes = episodes['observations'].shape[0]
+        episode_idxs = np.random.randint(0, num_episodes, batch_size).astype(int)        
+        t_samples = np.random.randint(self.rollout_length, size=batch_size).astype(int)
+        transitions = {key: np.array(episodes[key][episode_idxs, t_samples]) for key in ['observations', 'actions']}
+        future_offset = np.random.uniform(size=batch_size) * (self.rollout_length - t_samples)
+        future_offset = future_offset.astype(int)
+        future_t = (t_samples + 1 + future_offset)
+
+        future_ag = episodes['achieved_goals'][episode_idxs, future_t]
+        transitions['achieved_goals'] = future_ag
+
+        transitions['input_observations'] = np.concatenate([transitions['observations'], transitions['achieved_goals']], axis=1)
+        transitions['predicted_actions'] = np.array(list(map(lambda x: self.policy.act(x), list(transitions['input_observations']))))
+
+        # Compute supervised loss
+        bc_loss = np.mean(np.sum((transitions['predicted_actions'] - transitions['actions'])**2, axis=1))
+        bc_grad = -(1./batch_size) * (2 * (transitions['predicted_actions'] - transitions['actions']).T.dot(transitions['input_observations']))
+
+        return bc_loss, bc_grad
 
 def run_ars(params):
 
@@ -356,7 +458,7 @@ def run_ars(params):
         os.makedirs(logdir)
 
     env = gym.make(params['env_name'])
-    ob_dim = env.observation_space.shape[0]
+    ob_dim = env.observation_space.spaces['observation'].shape[0] + env.observation_space.spaces['desired_goal'].shape[0]
     ac_dim = env.action_space.shape[0]
 
     # set policy parameters. Possible filters: 'MeanStdFilter' for v2, 'NoFilter' for v1.
@@ -386,14 +488,16 @@ def run_ars(params):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env_name', type=str, default='HalfCheetah-v1')
+    # parser.add_argument('--env_name', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env_name', type=str, default='FetchSlide-v1')
     parser.add_argument('--n_iter', '-n', type=int, default=1000)
     parser.add_argument('--n_directions', '-nd', type=int, default=8)
     parser.add_argument('--deltas_used', '-du', type=int, default=8)
     parser.add_argument('--step_size', '-s', type=float, default=0.02)
     parser.add_argument('--delta_std', '-std', type=float, default=.03)
     parser.add_argument('--n_workers', '-e', type=int, default=18)
-    parser.add_argument('--rollout_length', '-r', type=int, default=1000)
+    # parser.add_argument('--rollout_length', '-r', type=int, default=1000)
+    parser.add_argument('--rollout_length', '-r', type=int, default=50)
 
     # for Swimmer-v1 and HalfCheetah-v1 use shift = 0
     # for Hopper-v1, Walker2d-v1, and Ant-v1 use shift = 1
@@ -406,8 +510,9 @@ if __name__ == '__main__':
     # for ARS V1 use filter = 'NoFilter'
     parser.add_argument('--filter', type=str, default='MeanStdFilter')
 
-    local_ip = socket.gethostbyname(socket.gethostname())
-    ray.init(redis_address= local_ip + ':6379')
+    # local_ip = socket.gethostbyname(socket.gethostname())
+    # ray.init(redis_address= local_ip + ':6379')
+    ray.init(num_cpus=4)
     
     args = parser.parse_args()
     params = vars(args)

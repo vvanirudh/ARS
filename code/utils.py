@@ -26,3 +26,19 @@ def batched_weighted_sum(weights, vecs, batch_size):
                         np.asarray(batch_vecs, dtype=np.float64))
         num_items_summed += len(batch_weights)
     return total, num_items_summed
+
+def restructure_episodes(episodes):
+    '''
+    episodes is a list of dictionaries with 2D numpy arrays
+    Need to return a dictionary of 3D numpy arrays
+    '''
+    num_episodes = len(episodes)
+    keys = episodes[0].keys()
+    shapes = {key: episodes[0][key].shape for key in keys}
+    re_episodes = {key: np.zeros((num_episodes, shapes[key][0], shapes[key][1])) for key in keys}
+    c = 0
+    for episode in episodes:
+        for key in keys:
+            re_episodes[key][c, :, :] = episode[key]
+        c += 1
+    return re_episodes

@@ -1,0 +1,5 @@
+*.TXT
+__pycache__
+code/data
+*.pyc
+data
